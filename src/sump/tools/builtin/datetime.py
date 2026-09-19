@@ -1,6 +1,6 @@
 """时间工具"""
 
-from datetime import datetime, timezone
+from datetime import datetime
 
 from sump.tools.base import Tool
 from typing import Any
@@ -15,4 +15,4 @@ class DateTimeTool(Tool):
     }
 
     async def execute(self, **kwargs: Any) -> Any:
-        return datetime.now(timezone.utc).isoformat()
+        return datetime.now().astimezone().isoformat()

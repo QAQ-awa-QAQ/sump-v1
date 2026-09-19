@@ -8,6 +8,7 @@ services:
     environment:
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
       - SUMP_ENV=${SUMP_ENV:-docker,local}   # 配置叠加：default → docker.yaml → local.yaml（凭据在 local.yaml）
+      - TZ=Asia/Shanghai                     # 容器时区（睡眠窗口/日志/时间戳按北京时间；宿主机可保持 UTC）
     volumes:
       - ./data:/app/data        # 记忆/日志/模型持久化
       - ./skills:/app/skills    # 技能持久化
