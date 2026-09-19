@@ -983,3 +983,61 @@ class TestIncomingFile:
         assert "课表.txt" in captured["text"]
         assert "已保存至" in captured["text"]
         assert "timetable data" in captured["text"]
+
+
+class TestMessageDispatch:
+    """消息事件的后台派发：不阻塞 action 响应，且消息间保持串行。"""
+
+    @pytest.mark.asyncio
+    async def test_handle_raw_spawns_background_task(self, config, monkeypatch):
+        plugin = NapCatPlugin(config)
+        handled: list[dict] = []
+
+        async def fake_safe(data):
+            handled.append(data)
+
+        monkeypatch.setattr(plugin, "_handle_message_safe", fake_safe)
+        await plugin._handle_raw(json.dumps({"post_type": "message", "user_id": "1"}))
+        await asyncio.sleep(0)  # 让后台任务得到调度
+        assert len(handled) == 1
+        assert handled[0]["user_id"] == "1"
+
+    @pytest.mark.asyncio
+    async def test_messages_processed_serially(self, config, monkeypatch):
+        plugin = NapCatPlugin(config)
+        order: list[str] = []
+
+        async def fake_handle(data):
+            order.append(f"start-{data['n']}")
+            await asyncio.sleep(0.01)
+            order.append(f"end-{data['n']}")
+
+        monkeypatch.setattr(plugin, "_handle_message", fake_handle)
+        await plugin._handle_raw(json.dumps({"post_type": "message", "n": 1}))
+        await plugin._handle_raw(json.dumps({"post_type": "message", "n": 2}))
+        await asyncio.sleep(0.05)
+        assert order == ["start-1", "end-1", "start-2", "end-2"]
+
+    @pytest.mark.asyncio
+    async def test_action_response_not_blocked_by_message(self, config, monkeypatch):
+        """消息处理阻塞时，action 响应仍能被立刻分发（防自等死锁）。"""
+        plugin = NapCatPlugin(config)
+        release = asyncio.Event()
+
+        async def slow_handle(data):
+            await release.wait()
+
+        monkeypatch.setattr(plugin, "_handle_message", slow_handle)
+        await plugin._handle_raw(json.dumps({"post_type": "message", "n": 1}))
+        await asyncio.sleep(0)  # 让慢任务先占住锁
+
+        fut = asyncio.get_running_loop().create_future()
+        plugin._pending_actions["sump-1"] = fut
+        await plugin._handle_raw(
+            json.dumps({"status": "ok", "echo": "sump-1", "data": {"url": "u"}})
+        )
+        assert fut.done()
+        assert fut.result()["data"]["url"] == "u"
+
+        release.set()
+        await asyncio.sleep(0.02)

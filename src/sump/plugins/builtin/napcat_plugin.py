@@ -49,6 +49,8 @@ class NapCatPlugin:
         # OneBot action 请求-响应（echo → future）
         self._pending_actions: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._action_seq = 0
+        # 消息处理后台任务锁：保证消息串行处理，同时不阻塞 action 响应分发
+        self._message_lock = asyncio.Lock()
         # 钩子：Agent 回复完成 → 发回 QQ；审批挂起/超时 → 推送主人
         self._bus.on(AgentEvents.REPLY, self._on_reply, consumer="napcat")
         self._bus.on(AgentEvents.APPROVAL_PENDING, self._on_approval_pending, consumer="napcat")
@@ -135,7 +137,17 @@ class NapCatPlugin:
                 fut.set_result(data)
             return
         if data.get("post_type") == "message":
-            await self._handle_message(data)
+            # 后台处理：长耗时消息（如文件下载 + action 往返）不能阻塞 WS 接收循环，
+            # 否则 action 响应无法分发 → 自等死锁
+            asyncio.create_task(self._handle_message_safe(data))
+
+    async def _handle_message_safe(self, data: dict[str, Any]) -> None:
+        """后台处理一条消息事件（锁保证串行，异常只记日志）。"""
+        async with self._message_lock:
+            try:
+                await self._handle_message(data)
+            except Exception as exc:  # noqa: BLE001
+                logger.error("消息处理失败：%s", exc)
 
     async def _handle_message(self, data: dict[str, Any]) -> None:
         """把 OneBot 消息事件转成 Agent 会话并驱动回复。"""
