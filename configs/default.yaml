@@ -61,7 +61,7 @@ tools:
   builtin:
     file: {enabled: true}
     shell: {enabled: true, timeout: 30, platform: "auto"}   # platform: windows / linux / auto / 自定义提示词原文
-    search: {enabled: true}
+    search: {enabled: true, searxng_url: "http://localhost:1010", timeout: 10}   # SearXNG 元搜索（直连 JSON API）
     web: {enabled: true, timeout: 10}
     datetime: {enabled: true}
     wait: {enabled: true, max_seconds: 600}   # 定时等待器（等待耗时任务）

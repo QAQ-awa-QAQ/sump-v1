@@ -3,3 +3,9 @@
 # （Docker Desktop for Windows/macOS 内建该域名；Linux 需在 compose 中加 extra_hosts: host-gateway）
 napcat:
   ws_url: "ws://host.docker.internal:3001"   # NapCat 正向 WebSocket（宿主机端口，默认 3001）
+tools:
+  builtin:
+    search:
+      searxng_url: "http://host.docker.internal:1010"   # 容器访问宿主机 SearXNG（直连 JSON API）
+  mcp:
+    enabled: false   # 容器内无 Node.js（npx 不可用），搜索走内置 search 直连 SearXNG

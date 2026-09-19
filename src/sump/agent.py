@@ -32,6 +32,7 @@ from sump.tools.builtin.asset_tools import (
     AssetUpdateTool,
 )
 from sump.tools.builtin.image_vision import ImageVisionTool
+from sump.tools.builtin.search import SearchTool
 from sump.tools.builtin.shell import ShellTool
 from sump.tools.builtin.tool_index import ToolIndexTool
 from sump.tools.builtin.wait import WaitTool
@@ -70,6 +71,10 @@ class Agent:
         self.tools = ToolRegistry()
         self.tools.register(ShellTool(
             platform=str(self.config.get("tools.builtin.shell.platform", "auto"))
+        ))
+        self.tools.register(SearchTool(
+            searxng_url=str(self.config.get("tools.builtin.search.searxng_url", "http://localhost:1010")),
+            timeout=float(self.config.get("tools.builtin.search.timeout", 10)),
         ))
         # 多模态主模型直读图片（图片块直发）→ 不挂额外识图工具；
         # 纯文本主模型（如 deepseek-v4-pro）挂 image_vision 兜底
