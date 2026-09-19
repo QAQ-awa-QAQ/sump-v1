@@ -96,7 +96,7 @@ CONFIG_SCHEMA: list[dict[str, Any]] = [
 
     # ---- NapCat ----
     {"key": "napcat.enabled", "label": "启用 NapCat QQ", "type": "bool", "section": "napcat", "default": True, "restart": True},
-    {"key": "napcat.ws_url", "label": "WebSocket 地址", "type": "string", "section": "napcat", "default": "ws://127.0.0.1:3000", "restart": True},
+    {"key": "napcat.ws_url", "label": "WebSocket 地址", "type": "string", "section": "napcat", "default": "ws://127.0.0.1:3001", "restart": True},
     {"key": "napcat.access_token", "label": "访问令牌", "type": "secret", "section": "napcat", "default": "", "hint": "留空表示不修改", "restart": True},
     {"key": "napcat.owner_id", "label": "主人 QQ 号", "type": "secret", "section": "napcat", "default": "", "hint": "零信任：仅主人可执行", "restart": True},
     {"key": "napcat.name", "label": "机器人名字", "type": "string", "section": "napcat", "default": "星宝", "hint": "群聊提到该名字增加权重", "restart": True},

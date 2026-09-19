@@ -2,4 +2,4 @@
 # 容器内的 127.0.0.1 指向容器自身而非宿主机，访问宿主机服务需用 host.docker.internal
 # （Docker Desktop for Windows/macOS 内建该域名；Linux 需在 compose 中加 extra_hosts: host-gateway）
 napcat:
-  ws_url: "ws://host.docker.internal:3000"   # NapCat 正向 WebSocket（宿主机端口）
+  ws_url: "ws://host.docker.internal:3001"   # NapCat 正向 WebSocket（宿主机端口，默认 3001）

@@ -127,7 +127,7 @@ events:
 
 napcat:
   enabled: true                        # 是否启用 NapCat QQ 适配（正向 WebSocket 客户端）
-  ws_url: "ws://127.0.0.1:3000"        # NapCat 正向 WebSocket 地址
+  ws_url: "ws://127.0.0.1:3001"        # NapCat 正向 WebSocket 地址（默认端口 3001，3000 是 HTTP）
   access_token: ""                     # OneBot access_token（本地敏感值放 configs/local.yaml，SUMP_ENV=local 加载）
   owner_id: ""                         # 主人 QQ 号（零信任：仅主人可执行，空则拒绝所有人；本地值放 configs/local.yaml）
   name: "星宝"                          # 机器人名字（群聊里提到该名字增加说话权重）
