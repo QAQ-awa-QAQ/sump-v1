@@ -39,6 +39,31 @@ class TestSettingsStore:
         assert saved["api_key"] == "sk-real"
         assert saved["model"] == "m2"
 
+    def test_masked_secret_keeps_existing(self, tmp_path, monkeypatch):
+        """前端回显的掩码值（含 ••••）视为不修改，不覆盖真实凭据。"""
+        monkeypatch.setenv("SUMP_SETTINGS_FILE", str(tmp_path / "settings.json"))
+        save_settings({"deepseek.api_key": "sk-real-key-123456"})
+        save_settings({
+            "deepseek.api_key": mask_secret("sk-real-key-123456"),
+            "deepseek.model": "m3",
+        })
+        saved = load_settings()["deepseek"]
+        assert saved["api_key"] == "sk-real-key-123456"
+        assert saved["model"] == "m3"
+
+    def test_masked_short_secret_keeps_existing(self, tmp_path, monkeypatch):
+        """短凭据的整体掩码（••••••••）同样不覆盖。"""
+        monkeypatch.setenv("SUMP_SETTINGS_FILE", str(tmp_path / "settings.json"))
+        save_settings({"napcat.access_token": "short-tok"})
+        save_settings({"napcat.access_token": mask_secret("short-tok")})
+        assert load_settings()["napcat"]["access_token"] == "short-tok"
+
+    def test_real_secret_still_saves(self, tmp_path, monkeypatch):
+        """非掩码的新凭据正常保存（不误伤真实修改）。"""
+        monkeypatch.setenv("SUMP_SETTINGS_FILE", str(tmp_path / "settings.json"))
+        save_settings({"napcat.access_token": "brand-new-token-42"})
+        assert load_settings()["napcat"]["access_token"] == "brand-new-token-42"
+
     def test_corrupt_file_returns_empty(self, tmp_path, monkeypatch):
         path = tmp_path / "settings.json"
         path.write_text("{bad json", encoding="utf-8")

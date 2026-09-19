@@ -1,5 +1,6 @@
 """NapCat 插件测试：OneBot 解析、会话路由、钩子闭环"""
 
+import asyncio
 import json
 from types import SimpleNamespace
 
@@ -601,3 +602,48 @@ class TestSendImageTo:
         assert agent.tools.get("send_qq_image") is not None
         assert agent.tools.get("asset_save") is not None
         assert agent.tools.get("asset_search") is not None
+
+
+class TestReconnectBackoff:
+    """连接循环反风暴：正常断开与异常都必须等待后再重连。"""
+
+    @pytest.mark.asyncio
+    async def test_normal_disconnect_waits_fixed_delay(self, config, monkeypatch):
+        plugin = NapCatPlugin(config)
+        calls: list[int] = []
+        sleeps: list[float] = []
+
+        async def fake_connect():
+            calls.append(1)
+            if len(calls) >= 3:
+                raise asyncio.CancelledError
+
+        async def fake_sleep(seconds):
+            sleeps.append(seconds)
+
+        monkeypatch.setattr(plugin, "_connect_and_serve", fake_connect)
+        monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+        with pytest.raises(asyncio.CancelledError):
+            await plugin._run_forever()
+        assert sleeps == [1.0, 1.0]
+
+    @pytest.mark.asyncio
+    async def test_errors_use_exponential_backoff(self, config, monkeypatch):
+        plugin = NapCatPlugin(config)
+        calls: list[int] = []
+        sleeps: list[float] = []
+
+        async def fake_connect():
+            calls.append(1)
+            if len(calls) >= 4:
+                raise asyncio.CancelledError
+            raise RuntimeError("boom")
+
+        async def fake_sleep(seconds):
+            sleeps.append(seconds)
+
+        monkeypatch.setattr(plugin, "_connect_and_serve", fake_connect)
+        monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+        with pytest.raises(asyncio.CancelledError):
+            await plugin._run_forever()
+        assert sleeps == [1.0, 2.0, 4.0]

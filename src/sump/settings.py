@@ -190,6 +190,10 @@ def _flat_to_nested(flat: dict[str, Any]) -> dict[str, Any]:
     return nested
 
 
+_MASK_MARK = "••••"
+"""掩码占位符标记（mask_secret 生成；前端原样回传时视为未修改）。"""
+
+
 def sanitize_patch(patch: dict[str, Any]) -> dict[str, Any]:
     """按 schema 校验扁平 patch：只保留已知 key，按类型转换。"""
     smap = schema_map()
@@ -198,8 +202,10 @@ def sanitize_patch(patch: dict[str, Any]) -> dict[str, Any]:
         item = smap.get(key)
         if item is None:
             continue
-        if item["type"] == "secret" and not str(raw).strip():
-            continue  # 敏感字段空值视为"不修改"
+        if item["type"] == "secret":
+            text = str(raw).strip()
+            if not text or _MASK_MARK in text:
+                continue  # 敏感字段空值 / 掩码回显值均视为"不修改"
         try:
             clean[key] = _coerce(item, raw)
         except (ValueError, TypeError):
@@ -226,4 +232,4 @@ def mask_secret(value: str) -> str:
         return ""
     if len(value) <= 12:
         return "••••••••"
-    return f"{value[:6]}••••{value[-4:]}"
+    return f"{value[:6]}{_MASK_MARK}{value[-4:]}"

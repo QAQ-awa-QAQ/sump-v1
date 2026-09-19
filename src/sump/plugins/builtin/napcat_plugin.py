@@ -82,14 +82,20 @@ class NapCatPlugin:
     # ------------------------------------------------------------------
 
     async def _run_forever(self) -> None:
+        """连接循环：正常断开 1 秒后重连；异常时指数退避（上限 30 秒），防止紧密重连风暴。"""
+        backoff = 1.0
         while True:
             try:
                 await self._connect_and_serve()
+                wait = 1.0
+                backoff = 1.0  # 对端正常关闭：固定短延迟并重置退避
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
-                logger.error("napcat 连接异常，5 秒后重连：%s", exc)
-                await asyncio.sleep(5)
+                wait = backoff
+                logger.error("napcat 连接异常，%.0f 秒后重连：%s", wait, exc)
+                backoff = min(backoff * 2, 30.0)
+            await asyncio.sleep(wait)
 
     async def _connect_and_serve(self) -> None:
         import websockets
