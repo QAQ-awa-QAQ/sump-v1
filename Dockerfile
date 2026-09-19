@@ -15,6 +15,9 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 # 先拷贝依赖清单与项目元数据（利用 Docker 层缓存）
 COPY pyproject.toml uv.lock README.md LICENSE ./
+# 默认走清华 PyPI 镜像（国内构建快且稳；可用 --build-arg UV_DEFAULT_INDEX=... 覆盖）
+ARG UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
+ENV UV_DEFAULT_INDEX=${UV_DEFAULT_INDEX}
 RUN uv sync --frozen --no-dev --no-install-project
 
 # 拷贝源码与配置，安装项目（src 布局：api/ 与 sump/ 包）
