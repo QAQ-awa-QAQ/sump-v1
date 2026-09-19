@@ -38,7 +38,7 @@ class NapCatPlugin:
         self._name = str(self._config.get("napcat.name", "星宝") or "星宝")
         self._bus = get_event_bus()
         self._agents: dict[str, Agent] = {}
-        self._pending_approval: dict[str, dict[str, str]] = {}  # session_id -> {"call_id", "source"}
+        self._pending_approval: dict[str, list[dict[str, str]]] = {}  # session_id -> 挂起队列（FIFO）
         self._pending_source: dict[str, str] = {}  # session_id -> 审批来源标注
         self._locks: dict[str, asyncio.Lock] = {}  # session_id -> 处理锁（防并发）
         self._ws: Any = None
@@ -184,15 +184,18 @@ class NapCatPlugin:
             await self._send(reply_ctx, "抱歉，你不是授权用户，已拒绝执行。")
             return
 
-        # 审批响应（仅主人私聊）：1=同意 / 2=拒绝，按挂起顺序 FIFO
+        # 审批响应（仅主人私聊）：1=同意 / 2=拒绝，按挂起顺序 FIFO（同会话可能排队多个）
         if (
             text in ("1", "2")
             and message_type == "private"
             and self._is_owner(user_id)
             and self._pending_approval
         ):
-            sid, pending = next(iter(self._pending_approval.items()))
-            self._pending_approval.pop(sid, None)
+            sid = next(iter(self._pending_approval))
+            queue = self._pending_approval[sid]
+            pending = queue.pop(0)
+            if not queue:
+                self._pending_approval.pop(sid, None)
             async with self._get_lock(sid):
                 await self._get_agent(sid).approve_and_continue(
                     pending["call_id"], text == "1"
@@ -303,7 +306,9 @@ class NapCatPlugin:
     ) -> None:
         """钩子：审批挂起 → 推送主人私聊（标注来源群聊 + 发起人）。"""
         source = self._pending_source.get(session_id, "未知")
-        self._pending_approval[session_id] = {"call_id": call_id, "source": source}
+        self._pending_approval.setdefault(session_id, []).append(
+            {"call_id": call_id, "source": source}
+        )
         ctx = self._owner_ctx()
         if ctx is None:
             logger.warning("未配置主人 QQ 号（napcat.owner_id），审批无法推送")
@@ -322,7 +327,11 @@ class NapCatPlugin:
         self, session_id: str, call_id: str, **kwargs: Any
     ) -> None:
         """钩子：审批超时 → 通知主人私聊并继续执行。"""
-        self._pending_approval.pop(session_id, None)
+        queue = self._pending_approval.get(session_id)
+        if queue is not None:
+            queue[:] = [p for p in queue if p["call_id"] != call_id]
+            if not queue:
+                self._pending_approval.pop(session_id, None)
         ctx = self._owner_ctx()
         if ctx is not None:
             await self._send(ctx, "审批超时，已自动拒绝。")

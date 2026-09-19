@@ -58,6 +58,53 @@ class TestApprovalTimeout:
         assert tool_msgs[-1].content == "审批超时，已自动拒绝执行"
 
 
+class TestOrphanToolCalls:
+    """被中断的 tool_calls（重启打断审批）在加载时自动补占位响应。"""
+
+    def test_repair_adds_placeholder(self, config):
+        from sump.types import Message
+
+        agent = Agent(config, deep_embedder=_FakeEmbedder())
+        agent.ctx.messages.append(Message(
+            role="assistant",
+            content="",
+            tool_calls=[
+                {"id": "c1", "type": "function", "function": {"name": "shell", "arguments": "{}"}},
+                {"id": "c2", "type": "function", "function": {"name": "shell", "arguments": "{}"}},
+            ],
+        ))
+        agent.ctx.messages.append(Message(role="tool", content="done", tool_call_id="c1"))
+
+        agent._repair_orphan_tool_calls()
+
+        placeholders = [
+            m for m in agent.ctx.messages
+            if m.role == "tool" and m.tool_call_id == "c2"
+        ]
+        assert len(placeholders) == 1
+        assert "未完成" in placeholders[0].content
+        # 占位响应紧跟 assistant 消息（保持 API 要求的顺序）
+        assert agent.ctx.messages[1].tool_call_id == "c2"
+
+    def test_repair_noop_when_complete(self, config):
+        from sump.types import Message
+
+        agent = Agent(config, deep_embedder=_FakeEmbedder())
+        agent.ctx.messages.append(Message(
+            role="assistant",
+            content="",
+            tool_calls=[
+                {"id": "c1", "type": "function", "function": {"name": "shell", "arguments": "{}"}}
+            ],
+        ))
+        agent.ctx.messages.append(Message(role="tool", content="done", tool_call_id="c1"))
+        before = len(agent.ctx.messages)
+
+        agent._repair_orphan_tool_calls()
+
+        assert len(agent.ctx.messages) == before
+
+
 class TestApproveAndContinue:
     @pytest.mark.asyncio
     async def test_approve_executes_and_continues(self, config):

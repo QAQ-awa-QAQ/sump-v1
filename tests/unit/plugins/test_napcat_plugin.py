@@ -471,7 +471,7 @@ class TestNapCatApproval:
             danger="high",
         )
 
-        assert plugin._pending_approval["private_111"] == {"call_id": "c1", "source": "未知"}
+        assert plugin._pending_approval["private_111"] == [{"call_id": "c1", "source": "未知"}]
         assert sent and "待审批" in sent[0][1]
         assert "rm -rf /" in sent[0][1]
         # 审批发到主人私聊
@@ -481,7 +481,7 @@ class TestNapCatApproval:
     async def test_approval_response_1_approves(self, config, monkeypatch):
         plugin = NapCatPlugin(config)
         monkeypatch.setattr(plugin, "_is_owner", lambda uid: True)
-        plugin._pending_approval["private_111"] = {"call_id": "c1", "source": "x"}
+        plugin._pending_approval["private_111"] = [{"call_id": "c1", "source": "x"}]
 
         calls: list[tuple] = []
 
@@ -505,7 +505,7 @@ class TestNapCatApproval:
     async def test_approval_response_2_rejects(self, config, monkeypatch):
         plugin = NapCatPlugin(config)
         monkeypatch.setattr(plugin, "_is_owner", lambda uid: True)
-        plugin._pending_approval["group_222"] = {"call_id": "c2", "source": "群聊 222 · 张三"}
+        plugin._pending_approval["group_222"] = [{"call_id": "c2", "source": "群聊 222 · 张三"}]
 
         calls: list[tuple] = []
 
@@ -524,6 +524,46 @@ class TestNapCatApproval:
         })
 
         assert calls == [("c2", False)]
+
+    @pytest.mark.asyncio
+    async def test_multiple_pendings_queue_fifo(self, config, monkeypatch):
+        """同一会话多个挂起：按 FIFO 依次审批，互不覆盖。"""
+        plugin = NapCatPlugin(config)
+        monkeypatch.setattr(plugin, "_is_owner", lambda uid: True)
+
+        async def fake_send(ctx, content):
+            pass
+
+        monkeypatch.setattr(plugin, "_send", fake_send)
+        monkeypatch.setattr(
+            plugin, "_owner_ctx", lambda: {"message_type": "private", "user_id": "1"}
+        )
+
+        calls: list[tuple] = []
+
+        async def fake_approve_and_continue(call_id, approved):
+            calls.append((call_id, approved))
+
+        agent = SimpleNamespace(approve_and_continue=fake_approve_and_continue)
+        monkeypatch.setattr(plugin, "_get_agent", lambda sid: agent)
+
+        await plugin._on_approval_pending(
+            session_id="private_111", call_id="c1", command="a", summary="", danger=""
+        )
+        await plugin._on_approval_pending(
+            session_id="private_111", call_id="c2", command="b", summary="", danger=""
+        )
+        assert [p["call_id"] for p in plugin._pending_approval["private_111"]] == ["c1", "c2"]
+
+        await plugin._handle_message({
+            "post_type": "message", "message_type": "private", "user_id": 111, "message": "1",
+        })
+        await plugin._handle_message({
+            "post_type": "message", "message_type": "private", "user_id": 111, "message": "2",
+        })
+
+        assert calls == [("c1", True), ("c2", False)]
+        assert not plugin._pending_approval
 
 
 class TestOwnerMarker:

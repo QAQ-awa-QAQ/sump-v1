@@ -239,6 +239,33 @@ class Agent:
                     entry.get("reasoning_content", "") if inject_reasoning else ""
                 ),
             ))
+        # 防御：为被中断的 tool_calls 补占位响应（重启打断审批等场景，防 API 400）
+        self._repair_orphan_tool_calls()
+
+    def _repair_orphan_tool_calls(self) -> None:
+        """为缺响应的 tool_calls 补占位 tool 消息（数据损坏的最终防线）。"""
+        responded = {
+            m.tool_call_id
+            for m in self.ctx.messages
+            if m.role == "tool" and m.tool_call_id
+        }
+        i = 0
+        while i < len(self.ctx.messages):
+            msg = self.ctx.messages[i]
+            if msg.role == "assistant" and msg.tool_calls:
+                missing = [
+                    t for t in msg.tool_calls
+                    if t.get("id") and t["id"] not in responded
+                ]
+                for offset, t in enumerate(missing):
+                    self.ctx.messages.insert(i + 1 + offset, Message(
+                        role="tool",
+                        content="该工具调用因中断未完成",
+                        tool_call_id=t["id"],
+                    ))
+                    responded.add(t["id"])
+                i += len(missing)
+            i += 1
 
     @property
     def _context_window(self) -> int:
