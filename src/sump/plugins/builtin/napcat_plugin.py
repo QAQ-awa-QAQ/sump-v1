@@ -11,6 +11,7 @@ import asyncio
 import base64
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +43,12 @@ class NapCatPlugin:
         self._locks: dict[str, asyncio.Lock] = {}  # session_id -> 处理锁（防并发）
         self._ws: Any = None
         self._task: asyncio.Task[None] | None = None
+        # 文件接收（QQ 文件消息 → 下载保存 + 文本预览）
+        self._file_dir = str(self._config.get("napcat.file_dir", "data/napcat_files"))
+        self._file_max_bytes = max(1, int(self._config.get("napcat.file_max_mb", 50))) * 1024 * 1024
+        # OneBot action 请求-响应（echo → future）
+        self._pending_actions: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        self._action_seq = 0
         # 钩子：Agent 回复完成 → 发回 QQ；审批挂起/超时 → 推送主人
         self._bus.on(AgentEvents.REPLY, self._on_reply, consumer="napcat")
         self._bus.on(AgentEvents.APPROVAL_PENDING, self._on_approval_pending, consumer="napcat")
@@ -116,10 +123,16 @@ class NapCatPlugin:
     # ------------------------------------------------------------------
 
     async def _handle_raw(self, raw: str) -> None:
-        """处理一条 WS 原始帧。"""
+        """处理一条 WS 原始帧（先匹配 action 响应，再处理消息事件）。"""
         try:
             data = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
+            return
+        echo = str(data.get("echo", "") or "")
+        if echo and echo in self._pending_actions:
+            fut = self._pending_actions.pop(echo)
+            if not fut.done():
+                fut.set_result(data)
             return
         if data.get("post_type") == "message":
             await self._handle_message(data)
@@ -137,6 +150,11 @@ class NapCatPlugin:
             else:
                 # 下载失败降级：文本占位，模型仍知道这条消息带过图片
                 text = f"{text}\n[图片]" if text else "[图片]"
+        # 文件消息：下载保存（PDF 等自动附文本预览），以说明文本注入上下文
+        for info in self._extract_files(data.get("message")):
+            note = await self._save_incoming_file(info, data)
+            if note:
+                text = f"{text}\n{note}" if text else note
         if (not text and not images) or not user_id:
             return
 
@@ -428,6 +446,154 @@ class NapCatPlugin:
             return None
         b64 = base64.b64encode(data).decode("utf-8")
         return f"data:{_guess_image_mime(data)};base64,{b64}"
+
+    # ------------------------------------------------------------------
+    # 文件消息（接收 / 保存 / 文本预览）
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _extract_files(message: Any) -> list[dict[str, str]]:
+        """从 OneBot message 段提取文件信息（file_id / 文件名 / url / 大小）。"""
+        files: list[dict[str, str]] = []
+        if isinstance(message, list):
+            for seg in message:
+                if isinstance(seg, dict) and seg.get("type") == "file":
+                    info = seg.get("data") or {}
+                    files.append({
+                        "file_id": str(info.get("file_id", "") or info.get("file", "")),
+                        "name": str(info.get("file", "") or info.get("name", "")),
+                        "url": str(info.get("url", "") or ""),
+                        "size": str(info.get("file_size", "") or ""),
+                    })
+        return files
+
+    async def _save_incoming_file(self, info: dict[str, str], envelope: dict[str, Any]) -> str | None:
+        """下载并保存用户发来的文件；返回注入上下文的说明文本（含文本预览）。"""
+        import httpx
+
+        name = _sanitize_filename(info["name"]) or "unnamed.bin"
+        url = info["url"] or await self._resolve_file_url(info, envelope)
+        if not url:
+            logger.warning("QQ 文件无下载链接：%s", name)
+            return f"[用户发来文件：{name}（无法获取下载链接，未保存）]"
+        try:
+            async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                data = resp.content
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("下载 QQ 文件失败：%s %s", name, exc)
+            return f"[用户发来文件：{name}（下载失败，未保存）]"
+
+        max_mb = self._file_max_bytes // (1024 * 1024)
+        if len(data) > self._file_max_bytes:
+            logger.warning("QQ 文件超过 %sMB 上限，跳过：%s", max_mb, name)
+            return f"[用户发来文件：{name}（超过 {max_mb}MB 上限，未保存）]"
+
+        path = self._unique_path(name)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        except OSError as exc:
+            logger.error("保存 QQ 文件失败：%s %s", path, exc)
+            return f"[用户发来文件：{name}（保存失败）]"
+
+        logger.info("QQ 文件已保存：%s（%dKB）", path, max(1, len(data) // 1024))
+        note = f"[用户发来文件：{name}，已保存至 {path}]"
+        preview = await asyncio.to_thread(_extract_text_preview, path)
+        if preview:
+            note += f"\n[文件内容预览]\n{preview}"
+        return note
+
+    def _unique_path(self, name: str) -> Path:
+        """生成不冲突的保存路径（重名自动加序号）。"""
+        base = Path(self._file_dir) / name
+        if not base.exists():
+            return base
+        stem, suffix = base.stem, base.suffix
+        for i in range(1, 1000):
+            candidate = base.with_name(f"{stem}_{i}{suffix}")
+            if not candidate.exists():
+                return candidate
+        return base
+
+    async def _resolve_file_url(self, info: dict[str, str], envelope: dict[str, Any]) -> str:
+        """file 段无 url 时，用 NapCat action 换取下载链接（私聊/群文件）。"""
+        file_id = info["file_id"]
+        if not file_id:
+            return ""
+        if envelope.get("message_type") == "group":
+            action = "get_group_file_url"
+            params: dict[str, Any] = {
+                "group_id": str(envelope.get("group_id", "")),
+                "file_id": file_id,
+            }
+        else:
+            action = "get_private_file_url"
+            params = {"file_id": file_id}
+        resp = await self._call_action(action, params)
+        data = (resp or {}).get("data") or {}
+        return str(data.get("url", "") or "")
+
+    async def _call_action(
+        self, action: str, params: dict[str, Any], timeout: float = 15.0
+    ) -> dict[str, Any] | None:
+        """发送 OneBot action 并等待 echo 匹配的响应；超时/失败返回 None。"""
+        if self._ws is None:
+            return None
+        self._action_seq += 1
+        echo = f"sump-{self._action_seq}"
+        fut: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+        self._pending_actions[echo] = fut
+        try:
+            await self._ws.send(json.dumps(
+                {"action": action, "params": params, "echo": echo},
+                ensure_ascii=False,
+            ))
+            return await asyncio.wait_for(fut, timeout=timeout)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("NapCat action 失败：%s %s", action, exc)
+            return None
+        finally:
+            self._pending_actions.pop(echo, None)
+
+
+def _sanitize_filename(name: str) -> str:
+    """清洗文件名：取 basename、替换危险字符、限长（防路径穿越）。"""
+    cleaned = Path(str(name).replace("\\", "/")).name.strip()
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", cleaned)
+    return cleaned[:120]
+
+
+def _extract_text_preview(path: Path, max_chars: int = 4000) -> str:
+    """提取文本类文件的内容预览（PDF / 纯文本）；不支持或失败返回空串。"""
+    suffix = path.suffix.lower()
+    try:
+        if suffix == ".pdf":
+            from pypdf import PdfReader  # 延迟导入：仅 PDF 场景需要
+
+            reader = PdfReader(str(path))
+            parts: list[str] = []
+            total = 0
+            for page in reader.pages[:30]:
+                chunk = page.extract_text() or ""
+                parts.append(chunk)
+                total += len(chunk)
+                if total >= max_chars * 2:
+                    break
+            text = "\n".join(parts).strip()
+        elif suffix in {".txt", ".md", ".csv", ".json", ".log", ".yaml", ".yml"}:
+            text = path.read_text(encoding="utf-8", errors="replace").strip()
+        else:
+            return ""
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("提取文件文本失败：%s %s", path.name, exc)
+        return ""
+    if not text:
+        return ""
+    if len(text) > max_chars:
+        return text[:max_chars] + "…（已截断）"
+    return text
 
 
 def _guess_image_mime(data: bytes) -> str:

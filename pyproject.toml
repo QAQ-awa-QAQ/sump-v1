@@ -23,6 +23,7 @@ dependencies = [
     "uvicorn[standard]>=0.29",
     "numpy>=1.24",
     "fastembed>=0.3",
+    "pypdf>=5.0",
 ]
 
 [project.optional-dependencies]

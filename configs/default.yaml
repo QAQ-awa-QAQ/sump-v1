@@ -133,3 +133,5 @@ napcat:
   name: "星宝"                          # 机器人名字（群聊里提到该名字增加说话权重）
   image_dir: "data/napcat_images"       # QQ 图片下载保存目录（内网 URL 云端不可达，下载到本地供识别）
   image_retention_days: 7               # QQ 图片缓存保留天数（睡眠巩固时清理超期文件）
+  file_dir: "data/napcat_files"         # QQ 文件下载保存目录（PDF 等自动附文本预览给模型）
+  file_max_mb: 50                       # 单文件下载上限（MB，超限跳过）

@@ -647,3 +647,339 @@ class TestReconnectBackoff:
         with pytest.raises(asyncio.CancelledError):
             await plugin._run_forever()
         assert sleeps == [1.0, 2.0, 4.0]
+
+
+def _make_pdf_with_text(text: str) -> bytes:
+    """构造带文本的最小 PDF（含正确 xref），用于解析测试。"""
+    objs = [
+        b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+        b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+        b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+        b"/Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n",
+    ]
+    stream = f"BT /F1 24 Tf 72 700 Td ({text}) Tj ET".encode()
+    objs.append(
+        b"4 0 obj\n<< /Length %d >>\nstream\n%s\nendstream\nendobj\n" % (len(stream), stream)
+    )
+    objs.append(b"5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n")
+    out = b"%PDF-1.4\n"
+    offsets: list[int] = []
+    for obj in objs:
+        offsets.append(len(out))
+        out += obj
+    xref_pos = len(out)
+    out += b"xref\n0 %d\n" % (len(objs) + 1)
+    out += b"0000000000 65535 f \n"
+    for off in offsets:
+        out += b"%010d 00000 n \n" % off
+    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF" % (
+        len(objs) + 1,
+        xref_pos,
+    )
+    return out
+
+
+class TestIncomingFile:
+    """QQ 文件接收：解析 / 消毒 / 下载保存 / 文本预览."""
+
+    def test_extract_files(self):
+        message = [
+            {"type": "text", "data": {"text": "看这个"}},
+            {
+                "type": "file",
+                "data": {
+                    "file": "课表 (2).pdf",
+                    "file_id": "abc-123",
+                    "file_size": "12345",
+                    "url": "https://example.com/dl",
+                },
+            },
+        ]
+        assert NapCatPlugin._extract_files(message) == [
+            {
+                "file_id": "abc-123",
+                "name": "课表 (2).pdf",
+                "url": "https://example.com/dl",
+                "size": "12345",
+            }
+        ]
+
+    def test_extract_files_ignores_others(self):
+        assert NapCatPlugin._extract_files("not a list") == []
+        assert NapCatPlugin._extract_files(None) == []
+        assert NapCatPlugin._extract_files([{"type": "image", "data": {}}]) == []
+
+    def test_sanitize_filename(self):
+        from sump.plugins.builtin.napcat_plugin import _sanitize_filename
+
+        assert _sanitize_filename("课表 (2).pdf") == "课表 (2).pdf"
+        assert _sanitize_filename("../../etc/passwd") == "passwd"
+        assert _sanitize_filename("..\\..\\win.ini") == "win.ini"
+        assert _sanitize_filename("") == ""
+
+    def test_text_preview_txt(self, tmp_path):
+        from sump.plugins.builtin.napcat_plugin import _extract_text_preview
+
+        p = tmp_path / "a.txt"
+        p.write_text("hello world", encoding="utf-8")
+        assert _extract_text_preview(p) == "hello world"
+
+    def test_text_preview_truncates(self, tmp_path):
+        from sump.plugins.builtin.napcat_plugin import _extract_text_preview
+
+        p = tmp_path / "b.txt"
+        p.write_text("x" * 5000, encoding="utf-8")
+        out = _extract_text_preview(p)
+        assert out.endswith("…（已截断）")
+        assert len(out) < 5000
+
+    def test_text_preview_unsupported_binary(self, tmp_path):
+        from sump.plugins.builtin.napcat_plugin import _extract_text_preview
+
+        p = tmp_path / "c.bin"
+        p.write_bytes(b"\x00\x01")
+        assert _extract_text_preview(p) == ""
+
+    def test_text_preview_pdf_blank(self, tmp_path):
+        """可解析但无文本的 PDF → 空预览（不报错）。"""
+        from pypdf import PdfWriter
+
+        from sump.plugins.builtin.napcat_plugin import _extract_text_preview
+
+        p = tmp_path / "blank.pdf"
+        writer = PdfWriter()
+        writer.add_blank_page(width=200, height=200)
+        with open(p, "wb") as f:
+            writer.write(f)
+        assert _extract_text_preview(p) == ""
+
+    def test_text_preview_pdf_corrupt(self, tmp_path):
+        from sump.plugins.builtin.napcat_plugin import _extract_text_preview
+
+        p = tmp_path / "bad.pdf"
+        p.write_bytes(b"%PDF-1.4 broken")
+        assert _extract_text_preview(p) == ""
+
+    def test_text_preview_pdf_extracts_text(self, tmp_path):
+        """pypdf 能从真实 PDF 提取文本。"""
+        from sump.plugins.builtin.napcat_plugin import _extract_text_preview
+
+        p = tmp_path / "hello.pdf"
+        p.write_bytes(_make_pdf_with_text("Hello PDF World"))
+        out = _extract_text_preview(p)
+        assert "Hello PDF World" in out
+
+    @pytest.mark.asyncio
+    async def test_call_action_echo_roundtrip(self, config):
+        plugin = NapCatPlugin(config)
+
+        class _FakeWS:
+            async def send(self, payload):
+                data = json.loads(payload)
+                await plugin._handle_raw(json.dumps({
+                    "status": "ok",
+                    "echo": data["echo"],
+                    "data": {"url": "https://cdn/x"},
+                }))
+
+        plugin._ws = _FakeWS()
+        resp = await plugin._call_action("get_private_file_url", {"file_id": "x"}, timeout=2)
+        assert resp is not None
+        assert resp["data"]["url"] == "https://cdn/x"
+        assert plugin._pending_actions == {}
+
+    @pytest.mark.asyncio
+    async def test_call_action_timeout_cleans_pending(self, config):
+        plugin = NapCatPlugin(config)
+
+        class _FakeWS:
+            async def send(self, payload):
+                pass  # 永不响应
+
+        plugin._ws = _FakeWS()
+        resp = await plugin._call_action("get_private_file_url", {"file_id": "x"}, timeout=0.05)
+        assert resp is None
+        assert plugin._pending_actions == {}
+
+    @pytest.mark.asyncio
+    async def test_save_incoming_file_with_url(self, config, tmp_path, monkeypatch):
+        """file 段自带 url：直接下载保存 + txt 预览注入。"""
+        import httpx
+
+        plugin = NapCatPlugin(config)
+        plugin._file_dir = str(tmp_path)
+
+        class _FakeResp:
+            content = b"timetable data"
+
+            def raise_for_status(self):
+                pass
+
+        class _FakeClient:
+            def __init__(self, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def get(self, url):
+                assert url == "https://x/dl"
+                return _FakeResp()
+
+        monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+        info = {"file_id": "f1", "name": "课表.txt", "url": "https://x/dl", "size": "10"}
+        note = await plugin._save_incoming_file(info, {"message_type": "private"})
+        assert "课表.txt" in note
+        assert "已保存至" in note
+        assert "timetable data" in note
+        assert (tmp_path / "课表.txt").read_bytes() == b"timetable data"
+
+    @pytest.mark.asyncio
+    async def test_save_file_without_url_uses_private_action(self, config, tmp_path, monkeypatch):
+        """无 url：走 get_private_file_url 换取链接。"""
+        import httpx
+
+        plugin = NapCatPlugin(config)
+        plugin._file_dir = str(tmp_path)
+        calls = []
+
+        async def fake_action(action, params, timeout=15.0):
+            calls.append((action, params))
+            return {"status": "ok", "data": {"url": "https://cdn/file.bin"}}
+
+        monkeypatch.setattr(plugin, "_call_action", fake_action)
+
+        class _FakeResp:
+            content = b"binary-data"
+
+            def raise_for_status(self):
+                pass
+
+        class _FakeClient:
+            def __init__(self, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def get(self, url):
+                assert url == "https://cdn/file.bin"
+                return _FakeResp()
+
+        monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+        info = {"file_id": "f2", "name": "数据.bin", "url": "", "size": "10"}
+        note = await plugin._save_incoming_file(info, {"message_type": "private"})
+        assert calls == [("get_private_file_url", {"file_id": "f2"})]
+        assert "已保存至" in note
+        assert (tmp_path / "数据.bin").exists()
+
+    @pytest.mark.asyncio
+    async def test_save_file_group_uses_group_action(self, config, monkeypatch):
+        """群聊文件走 get_group_file_url；拿不到链接时给出占位说明。"""
+        plugin = NapCatPlugin(config)
+        calls = []
+
+        async def fake_action(action, params, timeout=15.0):
+            calls.append((action, params))
+            return {"status": "ok", "data": {"url": ""}}
+
+        monkeypatch.setattr(plugin, "_call_action", fake_action)
+        info = {"file_id": "f3", "name": "a.pdf", "url": "", "size": "1"}
+        note = await plugin._save_incoming_file(info, {"message_type": "group", "group_id": "123"})
+        assert calls == [("get_group_file_url", {"group_id": "123", "file_id": "f3"})]
+        assert "无法获取下载链接" in note
+
+    @pytest.mark.asyncio
+    async def test_save_file_over_limit_skips(self, config, tmp_path, monkeypatch):
+        """超过大小上限：不保存。"""
+        import httpx
+
+        plugin = NapCatPlugin(config)
+        plugin._file_dir = str(tmp_path)
+        plugin._file_max_bytes = 10  # 10 字节上限
+
+        class _FakeResp:
+            content = b"x" * 100
+
+            def raise_for_status(self):
+                pass
+
+        class _FakeClient:
+            def __init__(self, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def get(self, url):
+                return _FakeResp()
+
+        monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+        info = {"file_id": "f4", "name": "big.bin", "url": "https://x/dl", "size": "100"}
+        note = await plugin._save_incoming_file(info, {"message_type": "private"})
+        assert "上限" in note
+        assert not (tmp_path / "big.bin").exists()
+
+    @pytest.mark.asyncio
+    async def test_handle_message_injects_file_note(self, config, tmp_path, monkeypatch):
+        """file 段走通 _handle_message：说明文本（含路径与预览）注入 Agent。"""
+        import httpx
+
+        plugin = NapCatPlugin(config)
+        plugin._owner_id = "2271917353"
+        plugin._file_dir = str(tmp_path)
+
+        class _FakeResp:
+            content = b"timetable data"
+
+            def raise_for_status(self):
+                pass
+
+        class _FakeClient:
+            def __init__(self, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def get(self, url):
+                return _FakeResp()
+
+        monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+
+        captured = {}
+
+        class _FakeAgent:
+            async def run_stream(self, text, images=None):
+                captured["text"] = text
+                if False:
+                    yield
+
+        plugin._agents["private_2271917353"] = _FakeAgent()
+        data = {
+            "post_type": "message",
+            "message_type": "private",
+            "user_id": "2271917353",
+            "message": [
+                {
+                    "type": "file",
+                    "data": {"file": "课表.txt", "file_id": "f9", "url": "https://x/dl"},
+                },
+            ],
+        }
+        await plugin._handle_message(data)
+        assert "课表.txt" in captured["text"]
+        assert "已保存至" in captured["text"]
+        assert "timetable data" in captured["text"]
