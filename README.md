@@ -1,6 +1,8 @@
-# SUMP — 数字神经系统
+# SUMP v1 — 数字神经系统
 
-> **状态：开发中 | 版本 v0.2.0**
+> **状态：已归档（不再开发）· 完整代码与历史归档于 [sump-v1](https://github.com/QAQ-awa-QAQ/sump-v1)（main + v0.1.0 ~ v1.0 全部 tag）**
+>
+> v1 因根本架构问题（**进程内共享状态 + 并发导致的严重竞态**）被整体重构；后继版本 **[v2](https://github.com/QAQ-awa-QAQ/sump)**（多服务 · WebSocket 互联 · 智能体循环自由跳转）已在 `sump` 仓库继续开发。本文档保留为 v1 的历史记录。
 
 集水器 · 汇聚万家之长 / The Sump — where diverse agentic paradigms converge.
 
